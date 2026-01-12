@@ -2,11 +2,12 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
 [![GitHub release](https://img.shields.io/github/release/elboletaire/ha-saj-esolar-cloud.svg)](https://github.com/elboletaire/ha-saj-esolar-cloud/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
 A comprehensive Home Assistant integration for SAJ eSolar cloud service, providing detailed monitoring of H1 inverters with battery storage systems.
 
 This integration is a complete rewrite focused on H1 inverters with battery storage, using the modern Elekeeper cloud API. The "Cloud" suffix denotes its cloud-based nature and distinguishes it from other SAJ eSolar integrations.
+It started as a fork of [SAJeSolar](https://github.com/djansen1987/SAJeSolar) by @djansen1987, and has since been fully rewritten for current API behavior and hardware targets, so the current codebase no longer shares code with the original project.
 
 ## ✨ Key Features
 
@@ -194,6 +195,10 @@ For bugs, please [open an issue on GitHub](https://github.com/elboletaire/ha-saj
 
 Please note: This is a personal project. While I welcome bug reports, I have limited time for feature requests and general support.
 
+## Attribution
+
+This project originated from [SAJeSolar](https://github.com/djansen1987/SAJeSolar) by @djansen1987. The current codebase is a full rewrite; this attribution reflects the project origin and early structure. Thanks for the original groundwork.
+
 ## 🙏 Credits
 
 Vibe coded by **Òscar Casajuana** ([@elboletaire](https://github.com/elboletaire))
@@ -202,7 +207,7 @@ Special thanks to the Home Assistant community and SAJ Electric for their solar 
 
 ## 📄 License
 
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the **GNU General Public License v3.0** - see the [LICENSE](LICENSE) file for details.
 
 ---
 

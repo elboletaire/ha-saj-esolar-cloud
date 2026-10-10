@@ -341,11 +341,16 @@ ENDPOINTS = {
     "battery_info": "/monitor/battery/getOneDeviceBatteryInfo",
     "battery_statistics": "/monitor/home/getHomeBatteryStatisticsData",
     "ems_list": "/monitor/plant/ems/getEmsListByPlant",
-    "plant_statistics": "/monitor/home/getPlantStatisticsData",
-    "plant_overview": "/monitor/home/getPlantGridOverviewInfo",
-    "energy_flow": "/monitor/home/getDeviceEneryFlowData",
     "raw_data": "/monitor/deviceData/findRawdataPageList",
     "device_alarms": "/alarm/device/userAlarmPage"
+}
+
+# api/v2 endpoints (relative to the region base URL with /api/v2 instead of /api/v1)
+ENDPOINTS_V2 = {
+    "login": "/sys/user/login",
+    "plant_capability": "/monitor/plant/getPlantCapability",
+    "plant_statistics": "/monitor/plantHome/getPlantEnergyStatistics",
+    "energy_flow": "/monitor/plantHome/getDeviceEnergyFlowDiagram",
 }
 
 # Battery sensor definitions for individual batteries

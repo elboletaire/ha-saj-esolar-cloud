@@ -13,8 +13,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
-from .const import DOMAIN, ENDPOINTS, UPDATE_INTERVAL, REGIONS
-from .elekeeper import calc_signature, encrypt, generatkey
+from .const import DOMAIN, ENDPOINTS, ENDPOINTS_V2, UPDATE_INTERVAL, REGIONS
+from .elekeeper import calc_signature, encrypt, generatkey, sign_v2_request
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +42,7 @@ class SAJeSolarDataUpdateCoordinator(DataUpdateCoordinator):
         self.password = password
         self.region = region
         self.base_url = REGIONS[region]
+        self.base_url_v2 = self.base_url.replace("/api/v1", "/api/v2")
         self.monitored_plants = monitored_plants or []
         self.auth_token = None
 
@@ -101,44 +102,67 @@ class SAJeSolarDataUpdateCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Error fetching data: {err}")
 
     async def _authenticate(self) -> None:
-        """Authenticate with the SAJ eSolar API using Elekeeper method."""
-        data_to_sign = {
-            "appProjectName": "elekeeper",
-            "clientDate": datetime.now().strftime("%Y-%m-%d"),
-            "lang": "en",
-            "timeStamp": int(time.time() * 1000),
-            "random": generatkey(32),
-            "clientId": "esolar-monitor-admin"
-        }
+        """Authenticate with the SAJ eSolar API using the Elekeeper v2 login.
 
+        The token returned by the v2 login is valid for both v1 and v2
+        endpoints, whereas the old v1 login token makes v2 endpoints
+        return empty data.
+        """
         login_data = {
             "username": self.username,
             "password": encrypt(self.password),
-            "rememberMe": "false",
+            "rememberMe": False,
             "loginType": 1,
         }
 
-        signed = calc_signature(data_to_sign)
-        data = signed | login_data
+        headers, body = sign_v2_request(login_data)
 
         async with self.session.post(
-            f"{self.base_url}{ENDPOINTS['login']}",
-            data=data,
+            f"{self.base_url_v2}{ENDPOINTS_V2['login']}",
+            data=body,
+            headers=headers,
         ) as resp:
             if resp.status == 401:
                 raise ConfigEntryAuthFailed("Invalid authentication")
             if resp.status != 200:
                 raise UpdateFailed(f"Login failed with status {resp.status}")
 
-            response_data = await resp.json()
+            response_data = await self._read_json(resp, "login")
 
             if "errCode" in response_data and response_data["errCode"] != 0:
                 raise ConfigEntryAuthFailed(f"Login failed: {response_data.get('errMsg', 'Unknown error')}")
 
-            if "data" in response_data and "token" in response_data['data']:
-                self.auth_token = response_data['data']['tokenHead'] + response_data['data']['token']
+            data = response_data.get("data") or {}
+            if "token" in data:
+                self.auth_token = (data.get("tokenHead") or "Bearer ") + data["token"]
             else:
                 raise UpdateFailed("Token not found in login response")
+
+    @staticmethod
+    async def _read_json(resp: aiohttp.ClientResponse, what: str) -> dict[str, Any]:
+        """Parse a JSON response, regardless of the content type the API sends."""
+        text = await resp.text()
+        try:
+            return json.loads(text)
+        except ValueError as err:
+            raise UpdateFailed(f"Unexpected response for {what}: {text[:200]}") from err
+
+    async def _post_v2(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
+        """POST a signed request to an api/v2 endpoint."""
+        headers, raw = sign_v2_request(body, token=self.auth_token)
+
+        async with self.session.post(
+            f"{self.base_url_v2}{ENDPOINTS_V2[endpoint]}",
+            data=raw,
+            headers=headers,
+        ) as resp:
+            if resp.status != 200:
+                raise UpdateFailed(f"Failed to get {endpoint}: {resp.status}")
+            response_data = await self._read_json(resp, endpoint)
+
+        if response_data.get("errCode", 0) != 0:
+            raise UpdateFailed(f"Failed to get {endpoint}: {response_data.get('errMsg', 'Unknown error')}")
+        return response_data
 
     async def _get_plant_list(self) -> dict[str, Any]:
         """Get list of plants."""
@@ -162,7 +186,7 @@ class SAJeSolarDataUpdateCoordinator(DataUpdateCoordinator):
         ) as resp:
             if resp.status != 200:
                 raise UpdateFailed(f"Failed to get plant list: {resp.status}")
-            return await resp.json()
+            return await self._read_json(resp, resp.url.path)
 
     async def _get_plant_details_for_plant(self, plant_uid: str) -> dict[str, Any]:
         """Get plant details for specific plant."""
@@ -185,7 +209,7 @@ class SAJeSolarDataUpdateCoordinator(DataUpdateCoordinator):
         ) as resp:
             if resp.status != 200:
                 raise UpdateFailed(f"Failed to get plant details: {resp.status}")
-            return await resp.json()
+            return await self._read_json(resp, resp.url.path)
 
     async def _get_device_list_for_plant(self, plant_uid: str) -> dict[str, Any]:
         """Get device list for specific plant."""
@@ -211,7 +235,7 @@ class SAJeSolarDataUpdateCoordinator(DataUpdateCoordinator):
         ) as resp:
             if resp.status != 200:
                 raise UpdateFailed(f"Failed to get device list: {resp.status}")
-            return await resp.json()
+            return await self._read_json(resp, resp.url.path)
 
     async def _get_battery_list_for_plant(self, plant_uid: str) -> dict[str, Any]:
         """Get battery list for specific plant."""
@@ -237,89 +261,29 @@ class SAJeSolarDataUpdateCoordinator(DataUpdateCoordinator):
         ) as resp:
             if resp.status != 200:
                 raise UpdateFailed(f"Failed to get battery list: {resp.status}")
-            return await resp.json()
+            return await self._read_json(resp, resp.url.path)
 
-    async def _resolve_query_device(self, plant_uid: str) -> dict[str, str]:
-        """Resolve the API query identifier for a plant.
+    async def _resolve_query_device(self, plant_uid: str) -> dict[str, Any]:
+        """Resolve the device the plant home endpoints have to be queried with.
 
-        Most inverters (e.g. H1) are queried by their inverter serial
-        (``deviceSn``). R5 inverters paired with a SEC-C smart meter report
-        ``queryDeviceDataType == 2`` and must be queried by the EMS module
-        serial (``emsSn``) instead, otherwise load/grid values return 0.
-        See ``elekeeper.prepare_data_for_query`` for the reference logic.
+        The web client takes the first entry of the plant capability
+        ``snList`` (inverter serial or EMS module serial, with its type).
         """
-        device_list = await self._get_device_list_for_plant(plant_uid)
-        device_sn = None
-        if device_list.get("data", {}).get("list"):
-            device_sn = device_list["data"]["list"][0].get("deviceSn")
-
-        plant_details = await self._get_plant_details_for_plant(plant_uid)
-        plant = plant_details.get("data", {})
-        module_sn_list = plant.get("moduleSnList") or []
-        ems_sn = module_sn_list[0] if module_sn_list else None
-
-        # Only R5 + SEC-C (queryDeviceDataType == 2) queries by emsSn.
-        # Everything else keeps the existing deviceSn behaviour.
-        if plant.get("queryDeviceDataType", 1) == 2 and ems_sn:
-            return {"emsSn": ems_sn}
-        if device_sn:
-            return {"deviceSn": device_sn}
-        if ems_sn:
-            return {"emsSn": ems_sn}
-
-        raise UpdateFailed(f"No device or EMS module found for plant {plant_uid}")
+        capability = await self._post_v2("plant_capability", {"plantUid": plant_uid})
+        sn_list = (capability.get("data") or {}).get("snList") or []
+        if not sn_list:
+            return {}
+        return {"sn": sn_list[0].get("sn"), "snType": sn_list[0].get("snType")}
 
     async def _get_plant_statistics_for_plant(self, plant_uid: str) -> dict[str, Any]:
         """Get plant statistics for specific plant."""
         query_device = await self._resolve_query_device(plant_uid)
-
-        data = {
-            "plantUid": plant_uid,
-            **query_device,
-            'appProjectName': 'elekeeper',
-            'clientDate': datetime.now().strftime("%Y-%m-%d"),
-            'lang': 'en',
-            'timeStamp': int(time.time() * 1000),
-            'random': generatkey(32),
-            'clientId': 'esolar-monitor-admin',
-        }
-
-        signed = calc_signature(data)
-
-        async with self.session.get(
-            f"{self.base_url}{ENDPOINTS['plant_statistics']}",
-            params=signed,
-            headers={'Authorization': self.auth_token},
-        ) as resp:
-            if resp.status != 200:
-                raise UpdateFailed(f"Failed to get plant statistics: {resp.status}")
-            return await resp.json()
+        return await self._post_v2("plant_statistics", {"plantUid": plant_uid, **query_device})
 
     async def _get_energy_flow_for_plant(self, plant_uid: str) -> dict[str, Any]:
         """Get energy flow for specific plant."""
         query_device = await self._resolve_query_device(plant_uid)
-
-        data = {
-            "plantUid": plant_uid,
-            **query_device,
-            'appProjectName': 'elekeeper',
-            'clientDate': datetime.now().strftime("%Y-%m-%d"),
-            'lang': 'en',
-            'timeStamp': int(time.time() * 1000),
-            'random': generatkey(32),
-            'clientId': 'esolar-monitor-admin',
-        }
-
-        signed = calc_signature(data)
-
-        async with self.session.get(
-            f"{self.base_url}{ENDPOINTS['energy_flow']}",
-            params=signed,
-            headers={'Authorization': self.auth_token},
-        ) as resp:
-            if resp.status != 200:
-                raise UpdateFailed(f"Failed to get energy flow: {resp.status}")
-            return await resp.json()
+        return await self._post_v2("energy_flow", {"plantUid": plant_uid, **query_device})
 
     async def _get_battery_info_for_plant(self, plant_uid: str) -> dict[str, Any]:
         """Get battery system info for specific plant."""
@@ -351,7 +315,7 @@ class SAJeSolarDataUpdateCoordinator(DataUpdateCoordinator):
         ) as resp:
             if resp.status != 200:
                 raise UpdateFailed(f"Failed to get battery info: {resp.status}")
-            return await resp.json()
+            return await self._read_json(resp, resp.url.path)
 
     async def _get_device_alarms_for_plant(self, plant_uid: str) -> dict[str, Any]:
         """Get device alarms for specific plant."""
@@ -389,143 +353,4 @@ class SAJeSolarDataUpdateCoordinator(DataUpdateCoordinator):
         ) as resp:
             if resp.status != 200:
                 raise UpdateFailed(f"Failed to get device alarms: {resp.status}")
-            return await resp.json()
-
-    async def _get_plant_statistics(self, plant_data: dict[str, Any]) -> dict[str, Any]:
-        """Get plant statistics data."""
-        plant = plant_data["data"]["list"][0]
-        plant_uid = plant["plantUid"]
-
-        data = {
-            "plantUid": plant_uid,
-            'appProjectName': 'elekeeper',
-            'clientDate': datetime.now().strftime("%Y-%m-%d"),
-            'lang': 'en',
-            'timeStamp': int(time.time() * 1000),
-            'random': generatkey(32),
-            'clientId': 'esolar-monitor-admin',
-        }
-
-        signed = calc_signature(data)
-
-        async with self.session.get(
-            f"{self.base_url}{ENDPOINTS['plant_statistics']}",
-            params=signed,
-            headers={'Authorization': self.auth_token},
-        ) as resp:
-            if resp.status != 200:
-                raise UpdateFailed(f"Failed to get plant statistics: {resp.status}")
-            return await resp.json()
-
-    async def _get_energy_flow(self, plant_data: dict[str, Any]) -> dict[str, Any]:
-        """Get energy flow data."""
-        plant = plant_data["data"]["list"][0]
-        plant_uid = plant["plantUid"]
-
-        data = {
-            "plantUid": plant_uid,
-            'appProjectName': 'elekeeper',
-            'clientDate': datetime.now().strftime("%Y-%m-%d"),
-            'lang': 'en',
-            'timeStamp': int(time.time() * 1000),
-            'random': generatkey(32),
-            'clientId': 'esolar-monitor-admin',
-        }
-
-        signed = calc_signature(data)
-
-        async with self.session.get(
-            f"{self.base_url}{ENDPOINTS['energy_flow']}",
-            params=signed,
-            headers={'Authorization': self.auth_token},
-        ) as resp:
-            if resp.status != 200:
-                raise UpdateFailed(f"Failed to get energy flow: {resp.status}")
-            return await resp.json()
-
-    async def _get_plant_details(self, plant_data: dict[str, Any]) -> dict[str, Any]:
-        """Get plant details."""
-        if not plant_data.get("data", {}).get("list"):
-            raise UpdateFailed("No plants found")
-
-        plant = plant_data["data"]["list"][0]  # Use first plant for now
-        plant_uid = plant["plantUid"]
-
-        data = {
-            "plantUid": plant_uid,
-            'appProjectName': 'elekeeper',
-            'clientDate': datetime.now().strftime("%Y-%m-%d"),
-            'lang': 'en',
-            'timeStamp': int(time.time() * 1000),
-            'random': generatkey(32),
-            'clientId': 'esolar-monitor-admin',
-        }
-
-        signed = calc_signature(data)
-
-        async with self.session.get(
-            f"{self.base_url}{ENDPOINTS['plant_detail']}",
-            params=signed,
-            headers={'Authorization': self.auth_token},
-        ) as resp:
-            if resp.status != 200:
-                raise UpdateFailed(f"Failed to get plant details: {resp.status}")
-            return await resp.json()
-
-    async def _get_device_list(self, plant_data: dict[str, Any]) -> dict[str, Any]:
-        """Get device list."""
-        plant = plant_data["data"]["list"][0]
-        plant_uid = plant["plantUid"]
-
-        data = {
-            "plantUid": plant_uid,
-            "pageSize": 100,
-            "pageNo": 1,
-            "searchOfficeIdArr": "1",
-            'appProjectName': 'elekeeper',
-            'clientDate': datetime.now().strftime("%Y-%m-%d"),
-            'lang': 'en',
-            'timeStamp': int(time.time() * 1000),
-            'random': generatkey(32),
-            'clientId': 'esolar-monitor-admin',
-        }
-
-        signed = calc_signature(data)
-
-        async with self.session.get(
-            f"{self.base_url}{ENDPOINTS['device_list']}",
-            params=signed,
-            headers={'Authorization': self.auth_token},
-        ) as resp:
-            if resp.status != 200:
-                raise UpdateFailed(f"Failed to get device list: {resp.status}")
-            return await resp.json()
-
-    async def _get_battery_list(self, plant_data: dict[str, Any]) -> dict[str, Any]:
-        """Get battery list."""
-        plant = plant_data["data"]["list"][0]
-        plant_uid = plant["plantUid"]
-
-        data = {
-            "plantUid": plant_uid,
-            "pageSize": 100,
-            "pageNo": 1,
-            "searchOfficeIdArr": "1",
-            'appProjectName': 'elekeeper',
-            'clientDate': datetime.now().strftime("%Y-%m-%d"),
-            'lang': 'en',
-            'timeStamp': int(time.time() * 1000),
-            'random': generatkey(32),
-            'clientId': 'esolar-monitor-admin',
-        }
-
-        signed = calc_signature(data)
-
-        async with self.session.get(
-            f"{self.base_url}{ENDPOINTS['battery_list']}",
-            params=signed,
-            headers={'Authorization': self.auth_token},
-        ) as resp:
-            if resp.status != 200:
-                raise UpdateFailed(f"Failed to get battery list: {resp.status}")
-            return await resp.json()
+            return await self._read_json(resp, resp.url.path)

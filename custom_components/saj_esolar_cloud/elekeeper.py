@@ -2,6 +2,8 @@
 import calendar
 import datetime
 import hashlib
+import hmac
+import json
 import binascii
 from Crypto.Cipher import AES
 import urllib.parse
@@ -70,6 +72,55 @@ def bytes_to_hex_string(e):
         t.append(hex(e[n] >> 4)[2:])  # Magasabb 4 bit átalakítása hexadecimálissá
         t.append(hex(e[n] & 15)[2:])  # Alacsonyabb 4 bit átalakítása hexadecimálissá
     return "".join(t)
+
+### 1b. Signing api/v2 requests (headers + JSON body)
+
+V2_SIGN_KEY = "b389a704-31f1-463d-8db7-435b18d1311d" #extracted from elekeeper web bundle
+V2_UNSIGNED_HEADERS = {"x-timestamp", "x-trace-id", "x-sign", "x-sign-enable"}
+
+def sign_v2_request(body, token=None, lang="en"):
+    """ Build headers and raw JSON body for an api/v2 request, as the elekeeper web client does """
+    timestamp = int(time.time() * 1000)
+    client_date = datetime.date.today().isoformat()
+    data = dict(body)
+    data.update({
+        "appProjectName": "elekeeper",
+        "clientDate": client_date,
+        "lang": lang,
+        "timeStamp": timestamp,
+        "clientId": "esolar-monitor-admin",
+        "clientCode": "organization",
+        "themeColor": "light",
+    })
+    data = {k: v for k, v in data.items() if v is not None and v != ""}
+
+    headers = {
+        "Content-Type": "application/json;charset=utf-8",
+        "X-Trace-Id": generatkey(16),
+        "X-App-Project-Name": "elekeeper",
+        "X-Client-Date": client_date,
+        "X-Lang": lang,
+        "X-Timestamp": str(timestamp),
+        "X-Client-Code": "organization",
+        "X-Theme-Color": "light",
+    }
+    if token:
+        headers["Authorization"] = token
+
+    raw = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+
+    # X-* headers (without prefix) + md5 of the body, sorted, then nonce and timestamp
+    params = {
+        k.lower()[2:]: v for k, v in headers.items()
+        if k.lower().startswith("x-") and k.lower() not in V2_UNSIGNED_HEADERS
+    }
+    params["body"] = hashlib.md5(raw.encode()).hexdigest()
+    parts = [f"{k}={params[k]}" for k in sorted(params, key=str.lower)]
+    parts.append(f"nonce={headers['X-Trace-Id']}")
+    parts.append(f"timestamp={headers['X-Timestamp']}")
+    headers["X-Sign"] = hmac.new(V2_SIGN_KEY.encode(), "&".join(parts).encode(), hashlib.sha256).hexdigest()
+
+    return headers, raw.encode()
 
 ### 2. Encrypt password
 

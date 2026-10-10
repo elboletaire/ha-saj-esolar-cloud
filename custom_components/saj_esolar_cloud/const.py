@@ -330,27 +330,26 @@ BATTERY_STATES = {
     1: "Discharging"
 }
 
-# New API endpoints for Elekeeper
+# api/v1 endpoints still in use
 ENDPOINTS = {
-    "login": "/sys/login",
-    "plant_list": "/monitor/plant/getEndUserPlantList",
-    "plant_detail": "/monitor/plant/getOnePlantInfo",
-    "device_list": "/monitor/device/getDeviceList",
-    "device_info": "/monitor/device/getOneDeviceInfo",
     "battery_list": "/monitor/battery/getBatteryList",
     "battery_info": "/monitor/battery/getOneDeviceBatteryInfo",
-    "battery_statistics": "/monitor/home/getHomeBatteryStatisticsData",
-    "ems_list": "/monitor/plant/ems/getEmsListByPlant",
-    "raw_data": "/monitor/deviceData/findRawdataPageList",
-    "device_alarms": "/alarm/device/userAlarmPage"
 }
 
 # api/v2 endpoints (relative to the region base URL with /api/v2 instead of /api/v1)
 ENDPOINTS_V2 = {
     "login": "/sys/user/login",
+    "plant_list": "/monitor/plant/getEndUserPlantList",
+    "plant_detail": "/monitor/plant/getOnePlantInfoV2",
     "plant_capability": "/monitor/plant/getPlantCapability",
     "plant_statistics": "/monitor/plantHome/getPlantEnergyStatistics",
     "energy_flow": "/monitor/plantHome/getDeviceEnergyFlowDiagram",
+    "device_tree": "/monitor/plantDevice/listForWeb",
+    "device_capability": "/monitor/inverter/getDeviceCapability",
+    "inverter_energy": "/monitor/device/getInverterEnergyDetail",
+    "raw_data": "/monitor/deviceData/findRawdataPageList",
+    "battery_info": "/monitor/device/getInverterBatteryEnergyDetailForApp",
+    "device_alarms": "/devicedata/alarm/device/userAlarmPage",
 }
 
 # Battery sensor definitions for individual batteries

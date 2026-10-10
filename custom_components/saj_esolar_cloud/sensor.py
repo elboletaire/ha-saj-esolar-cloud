@@ -26,7 +26,7 @@ from homeassistant.helpers.update_coordinator import (
 from homeassistant.util import dt as dt_util
 
 from .const import DEVICE_INFO, DIRECTION_STATES, BATTERY_STATES, DOMAIN, H1_SENSORS
-from .coordinator import SAJeSolarDataUpdateCoordinator
+from .coordinator import RUNNING_STATE_ALARM, RUNNING_STATE_NORMAL, SAJeSolarDataUpdateCoordinator
 
 # Device class mapping
 DEVICE_CLASS_MAP = {
@@ -44,6 +44,17 @@ STATE_CLASS_MAP = {
     "total_increasing": SensorStateClass.TOTAL_INCREASING,
     "total": SensorStateClass.TOTAL,
 }
+
+def optional_float(data: dict[str, Any], key: str) -> float | None:
+    """Read a numeric field, returning None (unknown) when it is missing."""
+    value = data.get(key)
+    if value in (None, ""):
+        return None
+    return float(str(value).rstrip("%"))
+
+def is_running(running_state: Any) -> bool:
+    """Whether an inverter runningState means it is online (normal or alarm)."""
+    return int(running_state) in (RUNNING_STATE_NORMAL, RUNNING_STATE_ALARM)
 
 def energy_stat(plant_stats: dict[str, Any], data_type: str, field: str) -> float:
     """Read a value from the plant statistics energyDataList.
@@ -196,15 +207,15 @@ class SAJeSolarSensor(CoordinatorEntity[SAJeSolarDataUpdateCoordinator], SensorE
 
             # Plant Detail Sensors - map from new plant data structure
             if self._sensor_key == "nowPower":
-                return float(device_data.get("powerNow", 0))
+                return optional_float(device_data, "powerNow")
             elif self._sensor_key == "todayElectricity":
-                return float(device_data.get("todayEnergy", 0))
+                return optional_float(device_data, "todayEnergy")
             elif self._sensor_key == "monthElectricity":
-                return float(device_data.get("monthEnergy", 0))
+                return optional_float(device_data, "monthEnergy")
             elif self._sensor_key == "yearElectricity":
-                return float(device_data.get("yearEnergy", 0))
+                return optional_float(device_data, "yearEnergy")
             elif self._sensor_key == "totalElectricity":
-                return float(device_data.get("totalEnergy", 0))
+                return optional_float(device_data, "totalEnergy")
             elif self._sensor_key == "totalConsumpElec":
                 # Use correct field names from plant statistics
                 return energy_stat(plant_stats, "LOAD_ENERGY", "energy1Total")
@@ -260,7 +271,7 @@ class SAJeSolarSensor(CoordinatorEntity[SAJeSolarDataUpdateCoordinator], SensorE
             # Device Power Sensors - map from energy flow and device data
             elif self._sensor_key == "pvPower":
                 # Use device powerNow for real-time PV power (not solarPower which is capacity)
-                return float(device_data.get("powerNow", 0))
+                return optional_float(device_data, "powerNow")
             elif self._sensor_key == "gridPower":
                 # Grid power from energy flow - correct field name
                 grid_power = float(energy_flow.get("sysGridPowerwatt", 0))
@@ -285,36 +296,44 @@ class SAJeSolarSensor(CoordinatorEntity[SAJeSolarDataUpdateCoordinator], SensorE
                 return float(energy_flow.get("totalLoadPowerwatt", 0))
             elif self._sensor_key == "batCapcity":
                 # Battery capacity from battery info (system total in kWh)
-                return float(battery_info.get("batCapacity", 0))
+                return optional_float(battery_info, "batCapacity")
             elif self._sensor_key == "batCurr":
                 # Battery current from battery info (system total)
-                return float(battery_info.get("batCurrent", 0))
+                return optional_float(battery_info, "batCurrent")
             elif self._sensor_key == "batVoltage":
                 # Battery voltage from battery info (system voltage)
-                return float(battery_info.get("batVoltage", 0))
+                return optional_float(battery_info, "batVoltage")
             elif self._sensor_key == "usableBatCapacity":
                 # Usable battery capacity from battery info
-                return float(battery_info.get("usableBatCapacity", 0))
+                return optional_float(battery_info, "usableBatCapacity")
             elif self._sensor_key == "batteryWorkTime":
                 # Battery remaining time in hours (convert from minutes)
-                work_time_min = battery_info.get("batteryWorkTime", 0)
-                return round(float(work_time_min) / 60, 1)  # Convert to hours
+                work_time_min = optional_float(battery_info, "batteryWorkTime")
+                if work_time_min is None:
+                    return None
+                return round(work_time_min / 60, 1)  # Convert to hours
             elif self._sensor_key == "operatingMode":
                 # Operating mode from battery info
-                return battery_info.get("userModeName", "Unknown")
+                return battery_info.get("userModeName") or energy_flow.get("userModeName") or "Unknown"
             elif self._sensor_key == "batEnergyPercent":
-                bat_percent = device_data.get("batEnergyPercent", "0")
-                return float(str(bat_percent).rstrip("%"))
+                return optional_float(device_data, "batEnergyPercent")
             elif self._sensor_key == "batteryDirection":
-                direction = device_data.get("batteryDirection", 0)
+                direction = energy_flow.get("batteryDirection", 0)
                 return BATTERY_STATES.get(int(direction), f"Unknown ({direction})")
             elif self._sensor_key == "isOnline":
-                running_state = device_data.get("runningState", 0)
-                return "Yes" if int(running_state) == 1 else "No"
+                running_state = device_data.get("runningState")
+                if running_state is None:
+                    return None
+                return "Yes" if is_running(running_state) else "No"
             elif self._sensor_key == "inverterStatus":
                 # Inverter status based on the active alarms of the device
                 # (plant statistics no longer report a deviceStatus)
-                return "Alarm" if device_alarms.get("list") else "OK"
+                if device_alarms.get("list") or device_data.get("runningState") == RUNNING_STATE_ALARM:
+                    return "Alarm"
+                if "list" not in device_alarms:
+                    # Alarms could not be fetched
+                    return None
+                return "OK"
 
             # Daily Values from plant statistics and device data - correct field names
             elif self._sensor_key == "dailyConsumption":
@@ -423,8 +442,9 @@ class SAJeSolarSensor(CoordinatorEntity[SAJeSolarDataUpdateCoordinator], SensorE
             device_list = plant_data.get("device_list", {}).get("data", {}).get("list", [])
             if device_list:
                 device_data = device_list[0]
-                running_state = device_data.get("runningState", 0)
-                return bool(int(running_state))
+                # Unknown state (e.g. the request failed) keeps the entity available
+                running_state = device_data.get("runningState")
+                return running_state is None or bool(int(running_state))
             return False
         except (KeyError, TypeError, ValueError):
             return False
